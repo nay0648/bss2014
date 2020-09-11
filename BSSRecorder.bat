@@ -1,0 +1,1 @@
+java -classpath BlindSourceSeparation.jar;lib/commons-math-2.1.jar;lib/gnujaxp.jar;lib/icam.jar;lib/iText-2.1.5.jar;lib/javabuilder.jar;lib/jcommon-1.0.16.jar;lib/jfreechart-1.0.13.jar;lib/jfreechart-1.0.13-experimental.jar;lib/jfreechart-1.0.13-swt.jar;lib/junit.jar;lib/servlet.jar;lib/swtgraphics2d.jar cn.edu.bjtu.cit.bss.recorder.BSSRecorder

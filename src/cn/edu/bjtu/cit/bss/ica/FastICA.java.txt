@@ -1,0 +1,271 @@
+package bss;
+import java.io.*;
+import java.util.*;
+import org.apache.commons.math.linear.*;
+import org.apache.commons.math.util.*;
+import pp.util.BLAS;
+
+/**
+ * <h1>Description</h1>
+ * The fast ICA algorithm implementation. Please see: Aapo Hyvarinen, Erkki Oja, 
+ * Independent Component Analysis: Algorithms and Applications for detail information.
+ * <h1>abstract</h1>
+ * <h1>keywords</h1>
+ * @author nay0648<br>
+ * if you have any questions, advices, suggests, or find any bugs, 
+ * please mail me: <a href="mailto:nay0648@163.com">nay0648@163.com</a>
+ * @version created on: Dec 10, 2010 12:00:25 PM, revision:
+ */
+public class FastICA implements Serializable
+{
+private static final long serialVersionUID=5451710405452715192L;
+/*
+ * the nonlinearity funciton used
+ */
+private static Map<String,Nonlinearity> NONLINEARITY=new HashMap<String,Nonlinearity>();
+
+	static
+	{
+		NONLINEARITY.put("gauss",new Nonlinearity.Gauss());
+		NONLINEARITY.put("pow3",new Nonlinearity.Pow3());
+		NONLINEARITY.put("tanh",new Nonlinearity.Tanh());
+	}
+
+private Nonlinearity nonlinearity=NONLINEARITY.get("gauss");//the nonlinearity function
+private double epsilon=1e-6;//converge threshold of the fast ica algorithm
+private static double pcath=1e-6;//threshold used in PCA
+private double[][] demix=null;//estimated demixing matrix
+
+	/**
+	 * Centering the signal, i.e. substract the signal mean from original signal.
+	 * @param sigs
+	 * Signal of all channels, will be replaced by the centered signals. Each row 
+	 * for a channel.
+	 * @return
+	 * corresponding mean value
+	 */
+	public static double[] centering(double[][] sigs)
+	{
+	double[] mean;
+
+		/*
+		 * calculate the mean value for each signal
+		 */
+		mean=new double[sigs.length];
+		for(int i=0;i<mean.length;i++) mean[i]=BLAS.mean(sigs[i]);
+		//centering
+		for(int i=0;i<mean.length;i++) BLAS.scalarAdd(-mean[i],sigs[i],sigs[i]);
+		return mean;
+	}
+	
+	/**
+	 * calculate the whitening matrix for centered signals
+	 * @param sigs
+	 * already centered signals, each row for a channel
+	 * @return
+	 * the whitening matrix
+	 */
+	public static double[][] whiteningMatrix(double[][] sigs)
+	{
+	RealMatrix cov;
+		
+		//calculate the covariance matrix;
+		{
+		double[][] cov1;
+		
+			cov1=new double[sigs.length][sigs.length];
+			for(int j=0;j<sigs[0].length;j++)
+				//accumulate the outerproduct
+				for(int ii=0;ii<sigs.length;ii++)
+					//symmetric
+					for(int jj=ii;jj<sigs.length;jj++) 
+						cov1[ii][jj]+=sigs[ii][j]*sigs[jj][j];
+			for(int i=0;i<cov1.length;i++)
+				for(int j=i;j<cov1[i].length;j++) 
+				{	
+					cov1[i][j]/=(double)sigs[0].length;
+					if(i!=j) cov1[j][i]=cov1[i][j];
+				}
+			//convert to commons math format
+			cov=new Array2DRowRealMatrix(cov1);
+		}
+		//calculate the whitening matrix
+		{
+		EigenDecompositionImpl eigen;
+		List<double[]> wl;
+		double[] ev;
+		double ed;
+		double[][] whitening;
+		int idx=0;
+			
+			//perform eigendecomposition on the covariance matrix
+			eigen=new EigenDecompositionImpl(cov,MathUtils.SAFE_MIN);
+			/*
+			 * rows of the whitening matrix
+			 */
+			wl=new LinkedList<double[]>();
+			for(int i=0;i<cov.getRowDimension();i++)
+			{
+				ed=eigen.getRealEigenvalue(i);
+				if(ed<pcath) continue;//not a principle component
+				ev=eigen.getEigenvector(i).getData();
+				BLAS.scalarMultiply(1.0/Math.sqrt(ed),ev,ev);
+				wl.add(ev);
+			}
+			/*
+			 * construct the whitening matrix
+			 */
+			whitening=new double[wl.size()][];
+			for(double[] v:wl) whitening[idx++]=v;
+			return whitening;
+		}
+	}
+
+	/**
+	 * get estimated demixing matrix of last fast ica invocation
+	 * @return
+	 */
+	public double[][] demixingMatrix()
+	{
+		return demix;
+	}
+	
+	/**
+	 * the instantaneous fast ica algorithm
+	 * @param sigs
+	 * the observed signals, each row is a channel
+	 * @return
+	 * the estimated source signals
+	 */
+	public double[][] fastICA(double[][] sigs)
+	{
+	double[][] sigs2;//a copy of observed signals
+	double[][] sigscw;//centered and whitened signals
+	double[][] whitening;//the whitening matrix
+	double[][] demixcw;//the demixing matrix for the centered and whitened signals
+	double[][] ests;//estimated signals
+	
+		sigs2=BLAS.copy(sigs,null);
+		/*
+		 * preprocessing
+		 */
+		centering(sigs2);
+		whitening=whiteningMatrix(sigs2);//calculate the whitening matrix
+		sigscw=BLAS.multiply(whitening,sigs2,null);//whitening the centered signals
+
+		//invocate fast ica algorithm
+		demixcw=fastICADeflation(sigscw);
+		
+		//demixing matrix for the observed signal
+		demix=BLAS.multiply(demixcw,whitening,null);
+		//calculate the estimated signals
+		ests=BLAS.multiply(demixcw,sigscw,sigscw);
+		return ests;
+	}
+
+	/**
+	 * use deflation method to estimate ics one by one
+	 * @param sigs
+	 * already centered, whitened signals, each row is a channel
+	 * @return
+	 * the demixing matrix for the input signal
+	 */
+	private double[][] fastICADeflation(double[][] sigs)
+	{
+	List<double[]> demixl;//demixing vectors
+	double[][] demixcw;//the demixing matrix
+	double[] w,w1,temp;//the estimated direction
+	double[] ex;//expectations
+	double eg;//expectation
+
+		/*
+		 * initialize
+		 */
+		demixl=new ArrayList<double[]>(sigs.length);
+		ex=new double[sigs.length];
+		w1=new double[sigs.length];
+		temp=new double[sigs.length];
+		//calculate demixing vectors one by one
+		for(;demixl.size()<sigs.length;)
+		{
+		double u;
+		
+			/*
+			 * generate a random init vector
+			 */
+			w=BLAS.randVector(sigs.length);
+			BLAS.normalize(w);
+			//search for the direction iteratively
+			for(int numit=0;;numit++)
+			{
+				Arrays.fill(ex,0);
+				eg=0;
+				for(int j=0;j<sigs[0].length;j++)
+				{
+					/*
+					 * calculate the inner product
+					 */
+					u=0;
+					for(int i=0;i<w.length;i++) u+=w[i]*sigs[i][j];
+					/*
+					 * accumulate for the expectation
+					 */
+					for(int i=0;i<ex.length;i++) ex[i]+=sigs[i][j]*nonlinearity.g(u);
+					eg+=nonlinearity.dg(u);
+				}
+				BLAS.scalarMultiply(1.0/sigs[0].length,ex,ex);
+				eg/=(double)sigs[0].length;
+				/*
+				 * the new direction
+				 */
+				BLAS.scalarMultiply(eg,w,temp);
+				BLAS.substract(ex,temp,w1);
+				/*
+				 * substract previous directions
+				 */
+				for(double[] pw:demixl)
+				{
+					BLAS.scalarMultiply(BLAS.innerProduct(w1,pw),pw,temp);
+					BLAS.substract(w1,temp,w1);
+				}
+				BLAS.normalize(w1);
+				//to see if the direction converges
+				if(1-Math.abs(BLAS.innerProduct(w,w1))<=epsilon)
+				{
+					if(BLAS.norm2(w)>(1-epsilon)) demixl.add(w);
+					break;
+				}
+				//not converge, continue the iteration
+				System.arraycopy(w1,0,w,0,w.length);
+			}
+		}
+		/*
+		 * construct the demixing matrix for the whitened signals 
+		 */
+		demixcw=new double[demixl.size()][];
+		for(int i=0;i<demixcw.length;i++) demixcw[i]=demixl.get(i);
+		return demixcw;
+	}
+
+	public static void main(String[] args) throws IOException
+	{
+	double[][] sigs,ests;//signals
+	double[][] mix;//mixing matrix
+	FastICA app;
+		
+		//load source signal from file
+		sigs=Util.loadSignals(new File("data/demosig.txt"),Util.Dimension.COLUMN);
+
+		/*
+		 * generate mixed signal, two extra channels are added deliberately
+		 */
+		mix=BLAS.randMatrix(sigs.length+2,sigs.length);
+		sigs=BLAS.multiply(mix,sigs,null);
+		/*
+		 * apply fast ica
+		 */
+		app=new FastICA();
+		ests=app.fastICA(sigs);
+		Util.plotSignals(ests);
+	}
+}
